@@ -223,3 +223,77 @@ versions of the channel contract.
 | `open` | Deploy a new channel contract with the given parameters. |
 | `admin` | Returns the admin address. |
 | `wasm_hash` | Returns the stored channel wasm hash. |
+
+# Account
+
+A custom account contract for Soroban (Stellar) controlled by an EVM
+(secp256k1) wallet key, such as a MetaMask account on Base or Ethereum.
+
+> [!WARNING]
+> **The contracts in this repository have not been audited.**
+
+The contract stores a single 20-byte Ethereum address. Any Soroban
+invocation that requires this account's authorization is approved by a
+`personal_sign` (EIP-191) signature from the corresponding EVM key over
+the Soroban authorization payload. This lets a user whose only key is an
+EVM browser wallet act as a first-class Soroban address — for example as
+the funder (`from`) of a payment channel — with no Stellar key at all.
+
+Replay protection, nonces, expiration, and network binding are provided
+by the Soroban authorization framework, which computes the 32-byte
+`signature_payload` over the full invocation tree. This contract only
+verifies that the payload was signed by the stored EVM address.
+
+## Signed message format
+
+The wallet signs the 66-character ASCII string `m = "0x" || lowercase_hex(payload)`
+via `personal_sign`. The contract rebuilds `m` from the payload and verifies:
+
+```text
+digest = keccak256("\x19Ethereum Signed Message:\n66" || m)
+ecrecover(digest, signature) == stored ethereum address
+```
+
+Note for SDKs: providers interpret a `0x`-prefixed `personal_sign` param as
+hex data and sign the *decoded* bytes. To sign the 66 ASCII bytes of `m`,
+pass `"0x" || hex(utf8_bytes(m))` (132 hex chars) at the RPC layer.
+
+Signatures must be 65 bytes `r || s || v` with canonical low `s` and
+`v` in {0, 1, 27, 28}. Only externally owned accounts are supported;
+contract wallets (ERC-1271) cannot be verified.
+
+## Functions
+
+| Function | Description |
+|---|---|
+| `__constructor` | Store the controlling Ethereum address. Immutable thereafter. |
+| `__check_auth` | Verify an EIP-191 signature over the authorization payload. |
+| `eth_address` | Returns the controlling Ethereum address. |
+| `extend` | Extend the lifetime (TTL) of the account's storage. |
+
+# Account Factory
+
+A factory contract for deploying account contracts on Soroban (Stellar).
+
+> [!WARNING]
+> **The contracts in this repository have not been audited.**
+
+The factory deploys account contracts at deterministic addresses derived
+from the controlling Ethereum address, so that an account's Soroban
+address is computable before it is deployed, and so that the deployed
+address is bound to its signer by construction.
+
+There is intentionally no caller-supplied salt and no admin function to
+change the stored account wasm hash: either would allow an attacker to
+front-run a deployment and bind a user's computed address to a different
+signer or different code. A new account wasm version requires deploying a
+new factory, which derives distinct account addresses.
+
+## Functions
+
+| Function | Description |
+|---|---|
+| `__constructor` | Initialize the factory with an account contract wasm hash. Immutable thereafter. |
+| `open_account` | Deploy the account contract for the given Ethereum address. |
+| `account_address` | Returns the deterministic account address for the given Ethereum address. |
+| `wasm_hash` | Returns the stored account wasm hash. |
