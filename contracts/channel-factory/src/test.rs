@@ -2,7 +2,7 @@
 
 use ed25519_dalek::SigningKey;
 use soroban_sdk::{
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation},
+    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Events as _},
     token::{StellarAssetClient, TokenClient},
     xdr::ToXdr,
     Address, BytesN, Env, IntoVal, Symbol,
@@ -135,4 +135,29 @@ fn test_open_wrong_wasm_hash_fails() {
     let other_wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
     let res = factory_client.try_open(&salt, &other_wasm_hash, &token_addr, &funder, &auth_pubkey, &to, &500i128, &100u32);
     assert_eq!(res, Err(Ok(Error::WasmHashMismatch.into())));
+}
+
+/// set_wasm emits an event naming the new hash, and the factory can have
+/// its TTL extended by anyone (I-5 / H-03).
+#[test]
+fn test_set_wasm_emits_event_and_extend() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let wasm_hash = env.deployer().upload_contract_wasm(channel_contract::WASM);
+    let factory_id = env.register(FactoryContract, (&admin, &wasm_hash));
+    let factory_client = FactoryContractClient::new(&env, &factory_id);
+
+    let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+    factory_client.set_wasm(&new_hash);
+
+    let events = env.events().all().filter_by_contract(&factory_id);
+    let emitted = events.events().iter().any(|e| match &e.body {
+        soroban_sdk::xdr::ContractEventBody::V0(body) => body.topics.first() == Some(&soroban_sdk::xdr::ScVal::Symbol(soroban_sdk::xdr::ScSymbol("wasm_set".try_into().unwrap()))),
+    });
+    assert!(emitted);
+    assert_eq!(factory_client.wasm_hash(), new_hash);
+
+    factory_client.extend();
 }

@@ -89,6 +89,7 @@ Open. `refund` can be called in Closed and Refunded.
 | `from` | Returns the funder address. |
 | `to` | Returns the recipient address. |
 | `refund_waiting_period` | Returns the refund waiting period in ledgers. |
+| `commitment_key` | Returns the ed25519 commitment signing key. |
 
 ### Getters (dynamic)
 
@@ -97,6 +98,7 @@ Open. `refund` can be called in Closed and Refunded.
 | `deposited` | Returns the total amount deposited. |
 | `balance` | Returns the current balance. |
 | `withdrawn` | Returns the total amount already withdrawn. |
+| `close_effective_at_ledger` | Returns the ledger at which the close is effective, if a close has started. |
 
 ## Lifecycle
 
@@ -216,6 +218,25 @@ afterwards belong to the funder alone and are reclaimed with a further
 directly to the address never raise `deposited`, so a channel is never
 reused after a close has started.
 
+## Observability
+
+`settle` and `close` succeed without moving tokens when the commitment
+amount is not above what was already withdrawn, and `close` succeeds
+even if its automatic refund fails. No channel event is emitted for a
+transfer that did not happen, so indexers must treat [`event::Withdraw`]
+and [`event::Refund`] (or the token contract's own events) as the signal
+for value movement, not the success of the call. Funder and recipient
+addresses are event topics, so a party can filter for its own channels.
+
+## Timing
+
+All durations are ledger counts. The TTL constants and the guidance on
+`refund_waiting_period` assume roughly 5-second ledgers; if the network
+cadence changes, the wall-clock meaning of a channel's immutable
+`refund_waiting_period` changes with it. Clients that quote a waiting
+period in wall-clock time should convert at channel creation and show
+the resulting ledger count.
+
 ## Storage lifetime
 
 All channel state is stored in instance storage. State-changing functions
@@ -252,6 +273,13 @@ versions of the channel contract.
 | `open` | Deploy a new channel contract with the given parameters. The caller passes the expected channel wasm hash, which must match the stored one. |
 | `admin` | Returns the admin address. |
 | `wasm_hash` | Returns the stored channel wasm hash. |
+| `extend` | Extend the lifetime (TTL) of the factory's storage. |
+
+## Storage lifetime
+
+`open`, `set_wasm`, and `extend` extend the factory's instance TTL. A
+factory left idle for a long period can still be archived; it must then
+be restored before use. Deployed channels do not depend on the factory.
 
 # Account
 
@@ -326,3 +354,12 @@ new factory, which derives distinct account addresses.
 | `open_account` | Deploy the account contract for the given Ethereum address. |
 | `account_address` | Returns the deterministic account address for the given Ethereum address. |
 | `wasm_hash` | Returns the stored account wasm hash. |
+| `extend` | Extend the lifetime (TTL) of the factory's storage. |
+
+## Storage lifetime
+
+`open_account` and `extend` extend the factory's instance TTL. A factory
+left idle for a long period can still be archived; it must then be
+restored before use. Deployed accounts do not depend on the factory, but
+an account deployed ahead of first use has its own TTL to maintain (see
+the account contract's `extend`).

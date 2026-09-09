@@ -139,6 +139,7 @@ fn test_deterministic_deployment() {
 
     // Re-deploying an existing account is rejected.
     assert!(factory_client.try_open_account(&eth).is_err());
+    factory_client.extend();
 }
 
 /// The escape hatch, end to end: an account controlled only by an EVM key is

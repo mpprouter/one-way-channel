@@ -89,6 +89,7 @@
 //! | `from` | Returns the funder address. |
 //! | `to` | Returns the recipient address. |
 //! | `refund_waiting_period` | Returns the refund waiting period in ledgers. |
+//! | `commitment_key` | Returns the ed25519 commitment signing key. |
 //!
 //! ### Getters (dynamic)
 //!
@@ -97,6 +98,7 @@
 //! | `deposited` | Returns the total amount deposited. |
 //! | `balance` | Returns the current balance. |
 //! | `withdrawn` | Returns the total amount already withdrawn. |
+//! | `close_effective_at_ledger` | Returns the ledger at which the close is effective, if a close has started. |
 //!
 //! ## Lifecycle
 //!
@@ -216,6 +218,25 @@
 //! directly to the address never raise `deposited`, so a channel is never
 //! reused after a close has started.
 //!
+//! ## Observability
+//!
+//! `settle` and `close` succeed without moving tokens when the commitment
+//! amount is not above what was already withdrawn, and `close` succeeds
+//! even if its automatic refund fails. No channel event is emitted for a
+//! transfer that did not happen, so indexers must treat [`event::Withdraw`]
+//! and [`event::Refund`] (or the token contract's own events) as the signal
+//! for value movement, not the success of the call. Funder and recipient
+//! addresses are event topics, so a party can filter for its own channels.
+//!
+//! ## Timing
+//!
+//! All durations are ledger counts. The TTL constants and the guidance on
+//! `refund_waiting_period` assume roughly 5-second ledgers; if the network
+//! cadence changes, the wall-clock meaning of a channel's immutable
+//! `refund_waiting_period` changes with it. Clients that quote a waiting
+//! period in wall-clock time should convert at channel creation and show
+//! the resulting ledger count.
+//!
 //! ## Storage lifetime
 //!
 //! All channel state is stored in instance storage. State-changing functions
@@ -247,6 +268,9 @@ const LEDGERS_PER_DAY: u32 = 17280;
 const TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
 /// The TTL to extend the instance storage to.
 const TTL_EXTEND_TO: u32 = 60 * LEDGERS_PER_DAY;
+/// Upper bound for `refund_waiting_period`, about one year of ledgers. A
+/// larger value would let a funder lock a channel for an impractical time.
+pub const MAX_REFUND_WAITING_PERIOD: u32 = 365 * LEDGERS_PER_DAY;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -259,6 +283,7 @@ pub enum Error {
     InsufficientDeposit = 5,
     Refunded = 6,
     Overflow = 7,
+    RefundWaitingPeriodTooLong = 8,
 }
 
 #[contracttype]
@@ -327,9 +352,12 @@ impl Contract {
     ///   recipient time to observe a close event and submit a close,
     ///   otherwise the recipient may not accept the channel. However, it
     ///   should not be so large that the funder cannot reclaim funds in a
-    ///   timely manner. Setting zero or a very low number results in
-    ///   near-immediate refunds, which is almost certainly not useful for
-    ///   either participant.
+    ///   timely manner. Zero is accepted but gives the recipient no window
+    ///   at all: `refund` is callable in the ledger right after
+    ///   `close_start`. Values above [`MAX_REFUND_WAITING_PERIOD`] (about
+    ///   one year at 5-second ledgers) are rejected. The value is a ledger
+    ///   count and is immutable; its wall-clock meaning changes if the
+    ///   network's ledger cadence changes.
     ///
     /// Callable by the deployer.
     ///
@@ -337,6 +365,7 @@ impl Contract {
     /// - `from`: required.
     pub fn __constructor(env: &Env, token: Address, from: Address, commitment_key: BytesN<32>, to: Address, amount: i128, refund_waiting_period: u32) {
         assert_with_error!(env, amount >= 0, Error::NegativeAmount);
+        assert_with_error!(env, refund_waiting_period <= MAX_REFUND_WAITING_PERIOD, Error::RefundWaitingPeriodTooLong);
 
         // Store channel configuration.
         env.storage().instance().set(&DataKey::Token, &token);
@@ -441,6 +470,28 @@ impl Contract {
     /// None.
     pub fn refund_waiting_period(env: &Env) -> u32 {
         env.storage().instance().get(&DataKey::RefundWaitingPeriod).unwrap()
+    }
+
+    /// Returns the ed25519 public key that commitments must be signed with.
+    ///
+    /// Callable by anyone.
+    ///
+    /// # Auth
+    /// None.
+    pub fn commitment_key(env: &Env) -> BytesN<32> {
+        env.storage().instance().get(&DataKey::CommitmentKey).unwrap()
+    }
+
+    /// Returns the ledger at which the close becomes (or became) effective,
+    /// or `None` if no close has started. Always the latest stored value: a
+    /// recipient `close` sets it to the current ledger.
+    ///
+    /// Callable by anyone.
+    ///
+    /// # Auth
+    /// None.
+    pub fn close_effective_at_ledger(env: &Env) -> Option<u32> {
+        Self::close_effective(env)
     }
 
     /// Returns the token balance held by the channel contract.
@@ -604,6 +655,11 @@ impl Contract {
     /// **Important:** The recipient should settle or close whenever they see
     /// a [`event::Close`], before the funder calls `refund`.
     ///
+    /// Calling `close_start` again before the close is effective restarts
+    /// the waiting period from the current ledger, which can only push the
+    /// deadline later. Once the close is effective it fails with
+    /// `AlreadyClosed`.
+    ///
     /// Callable by the funder (from).
     ///
     /// # Auth
@@ -693,7 +749,7 @@ impl Contract {
         }
     }
 
-    fn close_effective_at_ledger(env: &Env) -> Option<u32> {
+    fn close_effective(env: &Env) -> Option<u32> {
         env.storage().instance().get(&DataKey::CloseEffectiveAtLedger)
     }
 
