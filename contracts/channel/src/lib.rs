@@ -30,8 +30,15 @@
 //!
 //! - Verifies the `refund_waiting_period` at channel creation is long
 //!   enough to allow them to react to a close_start event.
-//! - Verifies the `amount` in each commitment is less than the channels
-//!   balance.
+//! - Verifies, against the chain, that the channel was deployed by the
+//!   expected factory with the expected token, `to`, and `commitment_key`,
+//!   and that no close has started, before accepting any commitment.
+//! - Verifies the `amount` in each commitment does not exceed the channel's
+//!   `deposited` total (balance plus already withdrawn). The contract rejects
+//!   larger commitments, so a commitment beyond `deposited` is worthless.
+//! - Keeps the commitment with the highest `amount`. Older commitments stay
+//!   valid signatures but are useless: settlement pays the cumulative
+//!   `amount` minus what was already withdrawn.
 //! - Monitors the channel for [`event::Close`] events.
 //! - Calls `settle` with a commitment promptly after seeing a close_start
 //!   event, before the funder calls `refund`.
@@ -45,10 +52,12 @@
 //!     Open --> Closing: close_start
 //!     Closing --> Closed: close
 //!     Closing --> Closed: [after wait]
-//!     Closed --> [*]: refund
+//!     Closed --> Refunded: refund
+//!     Refunded --> [*]
 //! ```
 //!
-//! `top_up`, `settle`, and `close` can be called in any state.
+//! `settle` and `close` can be called in any state before Refunded.
+//! `top_up` can only be called while Open.
 //!
 //! ## Functions
 //!
@@ -103,8 +112,9 @@
 //!
 //! The funder makes payments by signing commitments off-chain and sending them
 //! to the recipient. A commitment authorizes the recipient to settle or
-//! close the channel and receive a **cumulative total** amount. Each new
-//! commitment replaces the previous one.
+//! close the channel and receive a **cumulative total** amount. A newer
+//! commitment supersedes an older one only in the sense that its amount is
+//! higher; the older signature remains valid but pays nothing extra.
 //!
 //! For example:
 //! - Commitment for 100: recipient can settle or close and receive 100.
@@ -138,10 +148,9 @@
 //! already been withdrawn. If the commitment amount is less than or equal
 //! to what has already been withdrawn, no transfer occurs.
 //!
-//! If the channel balance is lower than the amount owed, the available
-//! balance is transferred and the remainder stays claimable: the recipient
-//! can settle again with the same commitment after the funder tops up the
-//! channel.
+//! A commitment whose amount exceeds the channel's `deposited` total is
+//! rejected outright. Nothing is transferred and nothing stays claimable:
+//! the recipient must never accept a commitment beyond `deposited`.
 //!
 //! Settlement is optional. The recipient does not need to settle at all —
 //! [`Contract::close`] will also settle any unsettled amount. The recipient
@@ -161,7 +170,8 @@
 //! [`Contract::refund`] to reclaim the remaining balance.
 //!
 //! Like `settle`, can be called even after the channel is closed, up until
-//! the funder calls [`Contract::refund`] and the balance is drained.
+//! the funder has been refunded. Once the channel is refunded, whether by
+//! the automatic refund in `close` or by [`Contract::refund`], it is final.
 //!
 //! ### 5. Close Start
 //!
@@ -186,6 +196,12 @@
 //! The contract does not reserve funds for the recipient. If the recipient
 //! has not closed before the funder calls refund, those funds are lost to
 //! the recipient and assumed to be of no interest to the recipient.
+//!
+//! Refund makes the channel final. The recipient can no longer settle or
+//! close, and the funder can no longer top up, so tokens that arrive
+//! afterwards belong to the funder alone and are reclaimed with a further
+//! `refund`. A closing or closed channel likewise cannot be topped up, so a
+//! channel is never reused after a close has started.
 //!
 //! ## Storage lifetime
 //!
@@ -227,6 +243,9 @@ pub enum Error {
     NotClosed = 2,
     RefundWaitingPeriodNotElapsed = 3,
     AlreadyClosed = 4,
+    InsufficientDeposit = 5,
+    Refunded = 6,
+    Overflow = 7,
 }
 
 #[contracttype]
@@ -238,6 +257,7 @@ pub enum DataKey {
     RefundWaitingPeriod,
     WithdrawnAmount,
     CloseEffectiveAtLedger,
+    Refunded,
 }
 
 #[contracttype]
@@ -330,12 +350,17 @@ impl Contract {
     /// Note: The funder can also top up the channel by transferring tokens
     /// directly to the channel contract address outside of this function.
     ///
+    /// Fails once `close` or `close_start` has been called: a closing or
+    /// closed channel cannot be reused, because the recipient would have no
+    /// challenge window against a refund.
+    ///
     /// Callable by funder (from).
     ///
     /// # Auth
     /// - `from`: required.
     pub fn top_up(env: &Env, amount: i128) {
         assert_with_error!(env, amount >= 0, Error::NegativeAmount);
+        assert_with_error!(env, Self::close_effective_at_ledger(env).is_none(), Error::AlreadyClosed);
         let from = Self::from(env);
         from.require_auth();
         Self::extend_instance_ttl(env);
@@ -420,7 +445,9 @@ impl Contract {
     /// # Auth
     /// None.
     pub fn deposited(env: &Env) -> i128 {
-        Self::balance(env) + Self::withdrawn(env)
+        let deposited = Self::balance(env).checked_add(Self::withdrawn(env));
+        assert_with_error!(env, deposited.is_some(), Error::Overflow);
+        deposited.unwrap()
     }
 
     /// Returns the total amount already withdrawn by the recipient via
@@ -465,12 +492,12 @@ impl Contract {
     /// If an older commitment with a lower amount is used after a higher amount
     /// has already been withdrawn, no funds are transferred.
     ///
-    /// If the channel balance is lower than the amount owed, the available
-    /// balance is transferred and the remainder stays claimable with the same
-    /// commitment after a future top up.
+    /// Fails if the amount exceeds the total deposited into the channel
+    /// (`deposited`): a commitment is only valid up to what is on chain.
     ///
     /// Can be called even after the channel is closed, up until the funder
-    /// calls [`Contract::refund`] and the balance is drained.
+    /// calls [`Contract::refund`]; after a refund the channel is final and
+    /// settle fails.
     ///
     /// Callable by the recipient (to).
     ///
@@ -479,6 +506,7 @@ impl Contract {
     /// - Commitment signature serves as commitment_key authorization.
     pub fn settle(env: &Env, amount: i128, sig: BytesN<64>) {
         assert_with_error!(&env, amount >= 0, Error::NegativeAmount);
+        assert_with_error!(env, !Self::refunded(env), Error::Refunded);
 
         // Verify the recipient and commitment signature.
         let to = Self::to(env);
@@ -493,21 +521,19 @@ impl Contract {
     /// Close the channel using a signed commitment, withdrawing funds to the
     /// recipient. The amount is the cumulative total the recipient is entitled
     /// to. Only the difference between the amount and what has already been
-    /// withdrawn is transferred. If the channel balance is lower than the
-    /// amount owed, the available balance is transferred rather than failing.
-    /// Note that because close makes the channel refundable immediately, any
-    /// shortfall is only recoverable if the funder tops up and the recipient
-    /// settles before the funder refunds — prefer `settle` when a shortfall
-    /// is expected to be recovered.
+    /// withdrawn is transferred. Fails if the amount exceeds the total
+    /// deposited into the channel (`deposited`).
     ///
     /// After transferring, this function automatically attempts to refund the
     /// remaining balance to the funder using `try_transfer`. This refund
     /// attempt will silently succeed or fail without affecting the withdrawal.
     /// If the automatic refund fails, the funder can call [`Contract::refund`]
-    /// to reclaim the remaining balance.
+    /// to reclaim the remaining balance. Once the funder has nothing left to
+    /// reclaim, because the balance was zero or the automatic refund went
+    /// through, the channel is final, exactly as after [`Contract::refund`].
     ///
     /// Can be called even after the channel is closed, up until the funder
-    /// calls [`Contract::refund`] and the balance is drained.
+    /// has been refunded; after that the channel is final and close fails.
     ///
     /// Callable by the recipient (to).
     ///
@@ -516,6 +542,7 @@ impl Contract {
     /// - Commitment signature serves as commitment_key authorization.
     pub fn close(env: &Env, amount: i128, sig: BytesN<64>) {
         assert_with_error!(&env, amount >= 0, Error::NegativeAmount);
+        assert_with_error!(env, !Self::refunded(env), Error::Refunded);
 
         // Verify the recipient and commitment signature.
         let to = Self::to(env);
@@ -542,10 +569,13 @@ impl Contract {
         let from = Self::from(env);
         let tc = Self::token_client(env);
         let balance = tc.balance(&env.current_contract_address());
-        if balance > 0 {
-            if tc.try_transfer(&env.current_contract_address(), &from, &balance).is_ok() {
-                env.events().publish_event(&event::Refund { from, amount: balance });
-            }
+        // The channel is final once the funder has nothing left to reclaim:
+        // either there was no balance, or the refund went through.
+        if balance == 0 {
+            env.storage().instance().set(&DataKey::Refunded, &true);
+        } else if tc.try_transfer(&env.current_contract_address(), &from, &balance).is_ok() {
+            env.storage().instance().set(&DataKey::Refunded, &true);
+            env.events().publish_event(&event::Refund { from, amount: balance });
         }
     }
 
@@ -585,9 +615,12 @@ impl Contract {
 
     /// Refund the remaining balance to the funder after the close is effective.
     ///
+    /// Makes the channel final: the recipient can no longer settle or close,
+    /// so any tokens that arrive afterwards belong to the funder alone.
+    ///
     /// Can be called multiple times. This is useful if the funder accidentally
-    /// deposits additional funds after closing — they can call refund
-    /// again to reclaim the additional balance.
+    /// transfers additional tokens to the channel after closing — they can
+    /// call refund again to reclaim the additional balance.
     ///
     /// Callable by the funder (from), after the close effective_at_ledger has
     /// been reached.
@@ -604,6 +637,10 @@ impl Contract {
         // Verify the funder.
         let from = Self::from(env);
         from.require_auth();
+
+        // The channel is final from here on, whether or not there is a
+        // balance to transfer.
+        env.storage().instance().set(&DataKey::Refunded, &true);
 
         // Transfer the remaining balance to the funder.
         let tc = Self::token_client(env);
@@ -626,26 +663,25 @@ impl Contract {
     }
 
     /// Transfer to the recipient the difference between the cumulative
-    /// committed amount and what has already been withdrawn, capped at the
-    /// channel's current balance. Advances WithdrawnAmount only by the amount
-    /// actually transferred, so any shortfall stays claimable later.
+    /// committed amount and what has already been withdrawn. Fails if the
+    /// committed amount exceeds the total deposited, so a commitment that
+    /// settles is always one that was fully backed on chain.
     fn withdraw(env: &Env, to: Address, amount: i128) {
-        let withdrawn = Self::withdrawn(env);
-        let owed = amount - withdrawn;
-        if owed > 0 {
-            let tc = Self::token_client(env);
-            let balance = tc.balance(&env.current_contract_address());
-            let payout = owed.min(balance);
-            if payout > 0 {
-                env.storage().instance().set(&DataKey::WithdrawnAmount, &(withdrawn + payout));
-                tc.transfer(&env.current_contract_address(), &to, &payout);
-                env.events().publish_event(&event::Withdraw { to, amount: payout });
-            }
+        assert_with_error!(env, amount <= Self::deposited(env), Error::InsufficientDeposit);
+        let payout = amount - Self::withdrawn(env);
+        if payout > 0 {
+            env.storage().instance().set(&DataKey::WithdrawnAmount, &amount);
+            Self::token_client(env).transfer(&env.current_contract_address(), &to, &payout);
+            env.events().publish_event(&event::Withdraw { to, amount: payout });
         }
     }
 
     fn close_effective_at_ledger(env: &Env) -> Option<u32> {
         env.storage().instance().get(&DataKey::CloseEffectiveAtLedger)
+    }
+
+    fn refunded(env: &Env) -> bool {
+        env.storage().instance().get(&DataKey::Refunded).unwrap_or(false)
     }
 }
 

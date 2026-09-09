@@ -7,7 +7,7 @@ use soroban_sdk::{
     xdr, Address, BytesN, Env, IntoVal, Symbol,
 };
 
-use crate::{Commitment, Contract, ContractClient};
+use crate::{Commitment, Contract, ContractClient, Error};
 
 fn has_event_type(env: &Env, contract: &Address, event_name: &str) -> bool {
     let events = env.events().all().filter_by_contract(contract);
@@ -755,8 +755,8 @@ fn test_refund_after_close() {
     assert_eq!(token.balance(&funder), 700);
 }
 
-/// Calling close a second time succeeds but does not transfer more than
-/// the cumulative committed amount.
+/// After close auto-refunds the funder the channel is final: top_up is
+/// rejected (ROZOSCA-9) and a further close is rejected (ROZOSCA-2).
 #[test]
 fn test_close_twice() {
     let env = Env::default();
@@ -780,21 +780,91 @@ fn test_close_twice() {
     assert_eq!(token.balance(&to), 300);
     assert_eq!(token.balance(&funder), 1700);
 
-    // Top up again.
-    client.top_up(&500);
+    // The channel cannot be reused: top up is rejected once closed.
+    assert_eq!(client.try_top_up(&500), Err(Ok(Error::AlreadyClosed.into())));
 
-    // Second close with higher commitment: transfers only the difference (200).
-    let sig2 = Commitment::new(channel_id.clone(), 500).sign(&auth_key);
-    client.close(&500, &sig2);
-    assert_eq!(token.balance(&to), 500);
-    assert_eq!(token.balance(&funder), 1500);
+    // And it is final: a second close is rejected, even with the same commitment.
+    assert_eq!(client.try_close(&300, &sig1), Err(Ok(Error::Refunded.into())));
+    assert_eq!(token.balance(&to), 300);
+    assert_eq!(token.balance(&funder), 1700);
     assert_eq!(token.balance(&channel_id), 0);
 }
 
-/// Close with a commitment amount exceeding the channel balance transfers
-/// the available balance and records only what was actually withdrawn.
+/// Once close_start has been called the funder cannot top up: a closing
+/// channel cannot be reused without a challenge window (ROZOSCA-9).
 #[test]
-fn test_close_amount_exceeds_balance() {
+fn test_top_up_after_close_start_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[29u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+
+    let (token_addr, token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, 100u32));
+    let client = ContractClient::new(&env, &channel_id);
+
+    client.close_start();
+    assert_eq!(client.try_top_up(&100), Err(Ok(Error::AlreadyClosed.into())));
+    assert_eq!(token.balance(&channel_id), 500);
+}
+
+/// After refund the channel is final: tokens that later land in the channel
+/// cannot be claimed by the recipient with an old commitment; only the
+/// funder can reclaim them with another refund (ROZOSCA-2).
+#[test]
+fn test_settle_after_refund_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[30u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+    let refund_waiting_period: u32 = 100;
+
+    let (token_addr, token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, refund_waiting_period));
+    let client = ContractClient::new(&env, &channel_id);
+
+    // Recipient holds a commitment for 400 but never settles.
+    let sig = Commitment::new(channel_id.clone(), 400).sign(&auth_key);
+
+    client.close_start();
+    env.ledger().with_mut(|li| {
+        li.sequence_number += refund_waiting_period + 1;
+    });
+    client.refund();
+    assert_eq!(token.balance(&funder), 1000);
+
+    // Funder accidentally sends tokens straight to the channel afterwards.
+    token.transfer(&funder, &channel_id, &300);
+    assert_eq!(token.balance(&channel_id), 300);
+
+    // The old commitment is worthless now.
+    assert_eq!(client.try_settle(&400, &sig), Err(Ok(Error::Refunded.into())));
+    assert_eq!(client.try_close(&400, &sig), Err(Ok(Error::Refunded.into())));
+    assert_eq!(token.balance(&to), 0);
+
+    // The funder reclaims the stray tokens.
+    client.refund();
+    assert_eq!(token.balance(&funder), 1000);
+    assert_eq!(token.balance(&channel_id), 0);
+}
+
+/// Close with a commitment amount exceeding the total deposited fails:
+/// a commitment is only valid up to what is on chain (ROZOSCA-7).
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_close_amount_exceeds_deposit_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -812,16 +882,13 @@ fn test_close_amount_exceeds_balance() {
 
     let sig = Commitment::new(channel_id.clone(), 600).sign(&auth_key);
     client.close(&600, &sig);
-    assert_eq!(token.balance(&to), 500);
-    assert_eq!(token.balance(&channel_id), 0);
-    assert_eq!(client.withdrawn(), 500);
 }
 
-/// Settle with a commitment amount exceeding the channel balance transfers
-/// the available balance; the remainder stays claimable with the same
-/// commitment after a top up.
+/// Settle with a commitment amount exceeding the total deposited fails and
+/// transfers nothing; after a top up that covers it, the same commitment
+/// settles in full (ROZOSCA-7).
 #[test]
-fn test_settle_partial_then_top_up() {
+fn test_settle_exceeds_deposit_fails_until_top_up() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -837,14 +904,15 @@ fn test_settle_partial_then_top_up() {
     let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, 100u32));
     let client = ContractClient::new(&env, &channel_id);
 
-    // Commitment for more than the channel balance: only the balance is paid.
+    // Commitment for more than the total deposited: rejected, nothing paid.
     let sig = Commitment::new(channel_id.clone(), 600).sign(&auth_key);
-    client.settle(&600, &sig);
-    assert_eq!(token.balance(&to), 500);
-    assert_eq!(token.balance(&channel_id), 0);
-    assert_eq!(client.withdrawn(), 500);
+    let res = client.try_settle(&600, &sig);
+    assert_eq!(res, Err(Ok(Error::InsufficientDeposit.into())));
+    assert_eq!(token.balance(&to), 0);
+    assert_eq!(token.balance(&channel_id), 500);
+    assert_eq!(client.withdrawn(), 0);
 
-    // After a top up, the same commitment settles the remainder.
+    // After a top up that covers it, the same commitment settles in full.
     client.top_up(&300);
     client.settle(&600, &sig);
     assert_eq!(token.balance(&to), 600);

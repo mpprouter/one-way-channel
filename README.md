@@ -30,8 +30,15 @@ to them.
 
 - Verifies the `refund_waiting_period` at channel creation is long
   enough to allow them to react to a close_start event.
-- Verifies the `amount` in each commitment is less than the channels
-  balance.
+- Verifies, against the chain, that the channel was deployed by the
+  expected factory with the expected token, `to`, and `commitment_key`,
+  and that no close has started, before accepting any commitment.
+- Verifies the `amount` in each commitment does not exceed the channel's
+  `deposited` total (balance plus already withdrawn). The contract rejects
+  larger commitments, so a commitment beyond `deposited` is worthless.
+- Keeps the commitment with the highest `amount`. Older commitments stay
+  valid signatures but are useless: settlement pays the cumulative
+  `amount` minus what was already withdrawn.
 - Monitors the channel for [`event::Close`] events.
 - Calls `settle` with a commitment promptly after seeing a close_start
   event, before the funder calls `refund`.
@@ -45,10 +52,12 @@ stateDiagram-v2
     Open --> Closing: close_start
     Closing --> Closed: close
     Closing --> Closed: [after wait]
-    Closed --> [*]: refund
+    Closed --> Refunded: refund
+    Refunded --> [*]
 ```
 
-`top_up`, `settle`, and `close` can be called in any state.
+`settle` and `close` can be called in any state before Refunded.
+`top_up` can only be called while Open.
 
 ## Functions
 
@@ -103,8 +112,9 @@ by transferring the token directly to the channel contract address.
 
 The funder makes payments by signing commitments off-chain and sending them
 to the recipient. A commitment authorizes the recipient to settle or
-close the channel and receive a **cumulative total** amount. Each new
-commitment replaces the previous one.
+close the channel and receive a **cumulative total** amount. A newer
+commitment supersedes an older one only in the sense that its amount is
+higher; the older signature remains valid but pays nothing extra.
 
 For example:
 - Commitment for 100: recipient can settle or close and receive 100.
@@ -138,10 +148,9 @@ transfers the difference between the commitment amount and what has
 already been withdrawn. If the commitment amount is less than or equal
 to what has already been withdrawn, no transfer occurs.
 
-If the channel balance is lower than the amount owed, the available
-balance is transferred and the remainder stays claimable: the recipient
-can settle again with the same commitment after the funder tops up the
-channel.
+A commitment whose amount exceeds the channel's `deposited` total is
+rejected outright. Nothing is transferred and nothing stays claimable:
+the recipient must never accept a commitment beyond `deposited`.
 
 Settlement is optional. The recipient does not need to settle at all —
 [`Contract::close`] will also settle any unsettled amount. The recipient
@@ -161,7 +170,8 @@ withdrawal. If the automatic refund fails, the funder can call
 [`Contract::refund`] to reclaim the remaining balance.
 
 Like `settle`, can be called even after the channel is closed, up until
-the funder calls [`Contract::refund`] and the balance is drained.
+the funder has been refunded. Once the channel is refunded, whether by
+the automatic refund in `close` or by [`Contract::refund`], it is final.
 
 ### 5. Close Start
 
@@ -186,6 +196,12 @@ close for.
 The contract does not reserve funds for the recipient. If the recipient
 has not closed before the funder calls refund, those funds are lost to
 the recipient and assumed to be of no interest to the recipient.
+
+Refund makes the channel final. The recipient can no longer settle or
+close, and the funder can no longer top up, so tokens that arrive
+afterwards belong to the funder alone and are reclaimed with a further
+`refund`. A closing or closed channel likewise cannot be topped up, so a
+channel is never reused after a close has started.
 
 ## Storage lifetime
 
@@ -220,7 +236,7 @@ versions of the channel contract.
 |---|---|
 | `__constructor` | Initialize the factory with an admin and channel wasm hash. |
 | `set_wasm` | Update the stored channel wasm hash. Admin only. |
-| `open` | Deploy a new channel contract with the given parameters. |
+| `open` | Deploy a new channel contract with the given parameters. The caller passes the expected channel wasm hash, which must match the stored one. |
 | `admin` | Returns the admin address. |
 | `wasm_hash` | Returns the stored channel wasm hash. |
 

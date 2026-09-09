@@ -12,12 +12,19 @@
 //! |---|---|
 //! | `__constructor` | Initialize the factory with an admin and channel wasm hash. |
 //! | `set_wasm` | Update the stored channel wasm hash. Admin only. |
-//! | `open` | Deploy a new channel contract with the given parameters. |
+//! | `open` | Deploy a new channel contract with the given parameters. The caller passes the expected channel wasm hash, which must match the stored one. |
 //! | `admin` | Returns the admin address. |
 //! | `wasm_hash` | Returns the stored channel wasm hash. |
 
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, xdr::ToXdr, Address, BytesN, Env};
+use soroban_sdk::{assert_with_error, contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, BytesN, Env};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    WasmHashMismatch = 1,
+}
 
 #[contracttype]
 pub enum DataKey {
@@ -80,17 +87,23 @@ impl FactoryContract {
 
     /// Deploy a new channel.
     ///
+    /// `wasm_hash` must equal the factory's stored channel wasm hash. Because
+    /// it is part of the invocation the funder authorizes, the funder's
+    /// signature pins the exact channel implementation that gets deployed;
+    /// an admin `set_wasm` between signing and submission makes the call fail
+    /// instead of silently deploying different code.
+    ///
     /// Callable by anyone, authorized by the funder (from).
     ///
     /// # Auth
     /// - `from`: required.
-    pub fn open(env: &Env, salt: BytesN<32>, token: Address, from: Address, commitment_key: BytesN<32>, to: Address, amount: i128, refund_waiting_period: u32) -> Address {
+    pub fn open(env: &Env, salt: BytesN<32>, wasm_hash: BytesN<32>, token: Address, from: Address, commitment_key: BytesN<32>, to: Address, amount: i128, refund_waiting_period: u32) -> Address {
         // Authorize the funder at the factory level so that the channel
         // constructor's top_up does not require non-root authorization.
         from.require_auth();
 
-        // Deploy the channel contract using the stored wasm hash.
-        let wasm_hash = Self::wasm_hash(env);
+        // The funder's authorization must name the implementation deployed.
+        assert_with_error!(env, wasm_hash == Self::wasm_hash(env), Error::WasmHashMismatch);
         let deployment_salt: BytesN<32> = env.crypto().sha256(&DeploymentSaltPreimage(from.clone(), salt).to_xdr(env)).into();
         let channel_address = env
             .deployer()
