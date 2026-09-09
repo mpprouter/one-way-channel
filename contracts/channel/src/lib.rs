@@ -37,9 +37,11 @@
 //!   `deposited` total, and that `balance` still covers `amount - withdrawn`.
 //!   The contract rejects commitments beyond `deposited`, and a transfer
 //!   that the balance cannot cover fails, so such a commitment is worthless.
-//! - Keeps the commitment with the highest `amount`. Older commitments stay
-//!   valid signatures but are useless: settlement pays the cumulative
-//!   `amount` minus what was already withdrawn.
+//! - Keeps the commitment with the highest `amount`. Older commitments
+//!   remain valid until the channel is final and can still pay any part of
+//!   their `amount` above what was already withdrawn; issuing a lower
+//!   amount does not revoke an earlier higher one. Settlement always pays
+//!   the cumulative `amount` minus what was already withdrawn.
 //! - Monitors the channel for [`event::Close`] events.
 //! - Calls `settle` with a commitment promptly after seeing a close_start
 //!   event, before the funder calls `refund`.
@@ -118,9 +120,11 @@
 //!
 //! The funder makes payments by signing commitments off-chain and sending them
 //! to the recipient. A commitment authorizes the recipient to settle or
-//! close the channel and receive a **cumulative total** amount. A newer
-//! commitment supersedes an older one only in the sense that its amount is
-//! higher; the older signature remains valid but pays nothing extra.
+//! close the channel and receive a **cumulative total** amount. Signing a
+//! new commitment does not invalidate earlier ones: every commitment stays
+//! usable until the channel is final and pays its `amount` minus what was
+//! already withdrawn, so signing clients should keep cumulative amounts
+//! nondecreasing.
 //!
 //! For example:
 //! - Commitment for 100: recipient can settle or close and receive 100.
@@ -155,8 +159,10 @@
 //! to what has already been withdrawn, no transfer occurs.
 //!
 //! A commitment whose amount exceeds the channel's `deposited` total is
-//! rejected outright. Nothing is transferred and nothing stays claimable:
-//! the recipient must never accept a commitment beyond `deposited`.
+//! rejected outright and nothing is transferred. The same commitment
+//! becomes redeemable if the funder later tops up enough to cover it, but
+//! the recipient should not rely on that: never accept a commitment beyond
+//! `deposited`.
 //!
 //! Settlement is all-or-nothing: if the channel's token balance ever drops
 //! below what a commitment needs (for example through an issuer clawback on
