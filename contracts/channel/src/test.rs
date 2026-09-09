@@ -7,7 +7,7 @@ use soroban_sdk::{
     xdr, Address, BytesN, Env, IntoVal, Symbol,
 };
 
-use crate::{Commitment, Contract, ContractClient, Error};
+use crate::{Commitment, Contract, ContractClient, Error, MAX_REFUND_WAITING_PERIOD};
 
 fn has_event_type(env: &Env, contract: &Address, event_name: &str) -> bool {
     let events = env.events().all().filter_by_contract(contract);
@@ -1068,4 +1068,115 @@ fn test_close_auto_refund_fails_then_refund() {
     client.refund();
     assert_eq!(token.balance(&funder), 700);
     assert_eq!(token.balance(&channel_id), 0);
+}
+
+/// Public getters expose the commitment key and the close deadline (H-02).
+#[test]
+fn test_getters_commitment_key_and_close_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[34u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+    let refund_waiting_period: u32 = 100;
+
+    let (token_addr, _token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, refund_waiting_period));
+    let client = ContractClient::new(&env, &channel_id);
+
+    assert_eq!(client.commitment_key(), auth_pubkey);
+    assert_eq!(client.close_effective_at_ledger(), None);
+
+    client.close_start();
+    let expected = env.ledger().sequence() + refund_waiting_period;
+    assert_eq!(client.close_effective_at_ledger(), Some(expected));
+
+    // A recipient close makes the deadline the current ledger.
+    let sig = Commitment::new(channel_id.clone(), 100).sign(&auth_key);
+    client.close(&100, &sig);
+    assert_eq!(client.close_effective_at_ledger(), Some(env.ledger().sequence()));
+}
+
+/// A refund waiting period above the supported maximum is rejected (I-7).
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_refund_waiting_period_too_long() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[35u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+
+    let (token_addr, _token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 0i128, MAX_REFUND_WAITING_PERIOD + 1));
+}
+
+/// Recipient and funder addresses are event topics (H-04 / I-9).
+#[test]
+fn test_party_addresses_are_event_topics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[36u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+
+    let (token_addr, _token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, 100u32));
+    let client = ContractClient::new(&env, &channel_id);
+    let to_val: xdr::ScVal = to.clone().try_into().unwrap();
+    let from_val: xdr::ScVal = funder.clone().try_into().unwrap();
+
+    // The test event buffer only holds the last invocation, so check each
+    // event right after the call that emits it.
+    let has_topic = |name: &str, val: &xdr::ScVal| {
+        let events = env.events().all().filter_by_contract(&channel_id);
+        events.events().iter().any(|e| match &e.body {
+            xdr::ContractEventBody::V0(body) => body.topics.first() == Some(&xdr::ScVal::Symbol(xdr::ScSymbol(name.try_into().unwrap()))) && body.topics.iter().any(|t| t == val),
+        })
+    };
+
+    // Open is emitted by the constructor; re-run the constructor path on a
+    // second channel so its events are the last invocation.
+    let channel2 = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 100i128, 100u32));
+    let events = env.events().all().filter_by_contract(&channel2);
+    let open_topics = events
+        .events()
+        .iter()
+        .find_map(|e| match &e.body {
+            xdr::ContractEventBody::V0(body) if body.topics.first() == Some(&xdr::ScVal::Symbol(xdr::ScSymbol("open".try_into().unwrap()))) => {
+                Some(body.topics.iter().any(|t| t == &from_val) && body.topics.iter().any(|t| t == &to_val))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(open_topics);
+
+    let sig = Commitment::new(channel_id.clone(), 200).sign(&auth_key);
+    client.settle(&200, &sig);
+    assert!(has_topic("withdraw", &to_val));
+
+    client.top_up(&100);
+    assert!(has_topic("deposit", &from_val));
+
+    client.close_start();
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 101;
+    });
+    client.refund();
+    assert!(has_topic("refund", &from_val));
 }
