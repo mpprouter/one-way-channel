@@ -26,9 +26,17 @@ readme:
 		&& cargo +nightly rustdoc -- -Zunstable-options -wjson
 	cd contracts/channel-factory \
 		&& cargo +nightly rustdoc -- -Zunstable-options -wjson
+	cd contracts/account \
+		&& cargo +nightly rustdoc -- -Zunstable-options -wjson
+	cd contracts/account-factory \
+		&& cargo +nightly rustdoc -- -Zunstable-options -wjson
 	jq -r '.index[.root|tostring].docs' target/doc/channel.json > README.md
 	echo "" >> README.md
 	jq -r '.index[.root|tostring].docs' target/doc/channel_factory.json >> README.md
+	echo "" >> README.md
+	jq -r '.index[.root|tostring].docs' target/doc/account.json >> README.md
+	echo "" >> README.md
+	jq -r '.index[.root|tostring].docs' target/doc/account_factory.json >> README.md
 
 readme-check: readme
 	git add -N . && git diff HEAD --exit-code

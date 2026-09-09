@@ -1,0 +1,17 @@
+[package]
+name = "account"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
