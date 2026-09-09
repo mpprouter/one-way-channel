@@ -8,7 +8,7 @@ use soroban_sdk::{
     Address, BytesN, Env, IntoVal, Symbol,
 };
 
-use crate::{DeploymentSaltPreimage, FactoryContract, FactoryContractClient};
+use crate::{DeploymentSaltPreimage, Error, FactoryContract, FactoryContractClient};
 
 mod channel_contract {
     soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/channel.wasm");
@@ -44,7 +44,7 @@ fn test_open() {
 
     // Deploy a channel via the factory.
     let salt = BytesN::from_array(&env, &[0u8; 32]);
-    let channel_id = factory_client.open(&salt, &token_addr, &funder, &auth_pubkey, &to, &500i128, &100u32);
+    let channel_id = factory_client.open(&salt, &wasm_hash, &token_addr, &funder, &auth_pubkey, &to, &500i128, &100u32);
     let expected_salt: BytesN<32> = env.crypto().sha256(&DeploymentSaltPreimage(funder.clone(), salt.clone()).to_xdr(&env)).into();
     let expected_channel_id = env.deployer().with_address(factory_id.clone(), expected_salt).deployed_address();
     let raw_salt_channel_id = env.deployer().with_address(factory_id.clone(), salt.clone()).deployed_address();
@@ -84,7 +84,7 @@ fn test_open_zero_amount() {
 
     // Deploy a channel via the factory with no initial deposit.
     let salt = BytesN::from_array(&env, &[0u8; 32]);
-    let channel_id = factory_client.open(&salt, &token_addr, &funder, &auth_pubkey, &to, &0i128, &100u32);
+    let channel_id = factory_client.open(&salt, &wasm_hash, &token_addr, &funder, &auth_pubkey, &to, &0i128, &100u32);
 
     assert_eq!(
         env.auths(),
@@ -94,7 +94,7 @@ fn test_open_zero_amount() {
                 function: AuthorizedFunction::Contract((
                     factory_id.clone(),
                     Symbol::new(&env, "open"),
-                    (salt.clone(), token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 0i128, 100u32).into_val(&env),
+                    (salt.clone(), wasm_hash.clone(), token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 0i128, 100u32).into_val(&env),
                 )),
                 sub_invocations: [AuthorizedInvocation {
                     function: AuthorizedFunction::Contract((
@@ -110,4 +110,29 @@ fn test_open_zero_amount() {
     );
     assert_eq!(token.balance(&channel_id), 0);
     assert_eq!(token.balance(&funder), 1000);
+}
+
+/// The funder's authorization pins the channel implementation: opening with
+/// a wasm hash that differs from the stored one fails (ROZOSCA-1).
+#[test]
+fn test_open_wrong_wasm_hash_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let wasm_hash = env.deployer().upload_contract_wasm(channel_contract::WASM);
+    let factory_id = env.register(FactoryContract, (&admin, &wasm_hash));
+    let factory_client = FactoryContractClient::new(&env, &factory_id);
+
+    let auth_key = SigningKey::from_bytes(&[2u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+    let funder = Address::generate(&env);
+    let to = Address::generate(&env);
+    let (token_addr, _token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let salt = BytesN::from_array(&env, &[0u8; 32]);
+    let other_wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+    let res = factory_client.try_open(&salt, &other_wasm_hash, &token_addr, &funder, &auth_pubkey, &to, &500i128, &100u32);
+    assert_eq!(res, Err(Ok(Error::WasmHashMismatch.into())));
 }

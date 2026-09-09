@@ -171,7 +171,7 @@ fn test_e2e_channel_exit_with_evm_signatures() {
     let to = Address::generate(&env);
     let salt = BytesN::from_array(&env, &[0u8; 32]);
     env.mock_all_auths();
-    let channel = channel_factory_client.open(&salt, &token_addr, &account, &commitment_key, &to, &0i128, &100u32);
+    let channel = channel_factory_client.open(&salt, &channel_wasm_hash, &token_addr, &account, &commitment_key, &to, &0i128, &100u32);
     let channel_client = channel_contract::Client::new(&env, &channel);
 
     // Deposit: direct token transfer to the channel is permissionless.

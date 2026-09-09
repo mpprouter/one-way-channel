@@ -30,8 +30,16 @@ to them.
 
 - Verifies the `refund_waiting_period` at channel creation is long
   enough to allow them to react to a close_start event.
-- Verifies the `amount` in each commitment is less than the channels
-  balance.
+- Verifies, against the chain, that the channel was deployed by the
+  expected factory with the expected token, `to`, and `commitment_key`,
+  and that no close has started, before accepting any commitment.
+- Verifies the `amount` in each commitment does not exceed the channel's
+  `deposited` total, and that `balance` still covers `amount - withdrawn`.
+  The contract rejects commitments beyond `deposited`, and a transfer
+  that the balance cannot cover fails, so such a commitment is worthless.
+- Keeps the commitment with the highest `amount`. Older commitments stay
+  valid signatures but are useless: settlement pays the cumulative
+  `amount` minus what was already withdrawn.
 - Monitors the channel for [`event::Close`] events.
 - Calls `settle` with a commitment promptly after seeing a close_start
   event, before the funder calls `refund`.
@@ -41,14 +49,17 @@ to them.
 ```mermaid
 stateDiagram-v2
     [*] --> Open: __constructor
-    Open --> Closed: close
+    Open --> Refunded: close
     Open --> Closing: close_start
-    Closing --> Closed: close
+    Closing --> Refunded: close
     Closing --> Closed: [after wait]
-    Closed --> [*]: refund
+    Closed --> Refunded: refund
+    Refunded --> [*]
 ```
 
-`top_up`, `settle`, and `close` can be called in any state.
+`settle` can be called in any state before Refunded. `close` can be
+called while Open, Closing, or Closed. `top_up` can only be called while
+Open. `refund` can be called in Closed and Refunded.
 
 ## Functions
 
@@ -96,15 +107,18 @@ address, an ed25519 `commitment_key` (public key), an initial deposit
 amount, and a `refund_waiting_period` (in ledgers).
 
 The funder's tokens are transferred into the channel contract on deployment.
-The funder can also top up the channel later using [`Contract::top_up`], or
-by transferring the token directly to the channel contract address.
+The funder can also top up the channel later using [`Contract::top_up`].
+Only these two paths count towards `deposited`, the ceiling for
+commitments; tokens sent directly to the channel address are not deposits
+and can only be reclaimed by the funder via `refund`.
 
 ### 2. Off-chain payments
 
 The funder makes payments by signing commitments off-chain and sending them
 to the recipient. A commitment authorizes the recipient to settle or
-close the channel and receive a **cumulative total** amount. Each new
-commitment replaces the previous one.
+close the channel and receive a **cumulative total** amount. A newer
+commitment supersedes an older one only in the sense that its amount is
+higher; the older signature remains valid but pays nothing extra.
 
 For example:
 - Commitment for 100: recipient can settle or close and receive 100.
@@ -138,10 +152,16 @@ transfers the difference between the commitment amount and what has
 already been withdrawn. If the commitment amount is less than or equal
 to what has already been withdrawn, no transfer occurs.
 
-If the channel balance is lower than the amount owed, the available
-balance is transferred and the remainder stays claimable: the recipient
-can settle again with the same commitment after the funder tops up the
-channel.
+A commitment whose amount exceeds the channel's `deposited` total is
+rejected outright. Nothing is transferred and nothing stays claimable:
+the recipient must never accept a commitment beyond `deposited`.
+
+Settlement is all-or-nothing: if the channel's token balance ever drops
+below what a commitment needs (for example through an issuer clawback on
+a token with `AUTH_CLAWBACK_ENABLED`, or a fee-on-transfer token), that
+commitment can no longer be settled. The recipient should therefore only
+accept channels denominated in a token whose issuer it trusts and whose
+transfers move the exact amount.
 
 Settlement is optional. The recipient does not need to settle at all —
 [`Contract::close`] will also settle any unsettled amount. The recipient
@@ -160,8 +180,10 @@ uses `try_transfer` and will silently succeed or fail without affecting the
 withdrawal. If the automatic refund fails, the funder can call
 [`Contract::refund`] to reclaim the remaining balance.
 
-Like `settle`, can be called even after the channel is closed, up until
-the funder calls [`Contract::refund`] and the balance is drained.
+Can be called while the channel is open or closing, but only once:
+`close` makes the channel final, so a second `close` or a later `settle`
+is rejected. If the automatic refund failed, the funder recovers the
+balance with [`Contract::refund`].
 
 ### 5. Close Start
 
@@ -186,6 +208,13 @@ close for.
 The contract does not reserve funds for the recipient. If the recipient
 has not closed before the funder calls refund, those funds are lost to
 the recipient and assumed to be of no interest to the recipient.
+
+Refund makes the channel final. The recipient can no longer settle or
+close, and the funder can no longer top up, so tokens that arrive
+afterwards belong to the funder alone and are reclaimed with a further
+`refund`. A closing channel likewise cannot be topped up, and tokens sent
+directly to the address never raise `deposited`, so a channel is never
+reused after a close has started.
 
 ## Storage lifetime
 
@@ -220,7 +249,7 @@ versions of the channel contract.
 |---|---|
 | `__constructor` | Initialize the factory with an admin and channel wasm hash. |
 | `set_wasm` | Update the stored channel wasm hash. Admin only. |
-| `open` | Deploy a new channel contract with the given parameters. |
+| `open` | Deploy a new channel contract with the given parameters. The caller passes the expected channel wasm hash, which must match the stored one. |
 | `admin` | Returns the admin address. |
 | `wasm_hash` | Returns the stored channel wasm hash. |
 
