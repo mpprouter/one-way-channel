@@ -941,3 +941,84 @@ fn test_top_up_emits_deposit_event() {
     client.top_up(&200);
     assert!(has_event_type(&env, &channel_id, "deposit"));
 }
+
+/// Tokens sent straight to the channel address are not deposits: they do not
+/// raise `deposited`, so they cannot enlarge what a commitment can claim
+/// after close_start, and only the funder gets them back (ROZOSCA-9).
+#[test]
+fn test_direct_transfer_does_not_raise_deposited() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[31u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+    let refund_waiting_period: u32 = 100;
+
+    let (token_addr, token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &2000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, refund_waiting_period));
+    let client = ContractClient::new(&env, &channel_id);
+    assert_eq!(client.deposited(), 500);
+
+    client.close_start();
+
+    // Funder bypasses the blocked top_up with a direct transfer.
+    token.transfer(&funder, &channel_id, &1000);
+    assert_eq!(token.balance(&channel_id), 1500);
+    assert_eq!(client.deposited(), 500);
+
+    // A commitment for the enlarged balance is rejected.
+    let sig = Commitment::new(channel_id.clone(), 1200).sign(&auth_key);
+    assert_eq!(client.try_settle(&1200, &sig), Err(Ok(Error::InsufficientDeposit.into())));
+
+    // A commitment within the real deposit still settles.
+    let sig = Commitment::new(channel_id.clone(), 400).sign(&auth_key);
+    client.settle(&400, &sig);
+    assert_eq!(token.balance(&to), 400);
+
+    // The funder reclaims everything else after the waiting period.
+    env.ledger().with_mut(|li| {
+        li.sequence_number += refund_waiting_period + 1;
+    });
+    client.refund();
+    assert_eq!(token.balance(&funder), 1600);
+    assert_eq!(token.balance(&channel_id), 0);
+}
+
+/// Settling exactly the deposited total after a partial withdrawal is the
+/// boundary of the InsufficientDeposit check.
+#[test]
+fn test_settle_exactly_deposited_after_partial() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[32u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+
+    let (token_addr, token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, 100u32));
+    let client = ContractClient::new(&env, &channel_id);
+
+    let sig = Commitment::new(channel_id.clone(), 200).sign(&auth_key);
+    client.settle(&200, &sig);
+    client.top_up(&300);
+    assert_eq!(client.deposited(), 800);
+
+    let sig = Commitment::new(channel_id.clone(), 800).sign(&auth_key);
+    client.settle(&800, &sig);
+    assert_eq!(token.balance(&to), 800);
+    assert_eq!(token.balance(&channel_id), 0);
+    assert_eq!(client.withdrawn(), 800);
+
+    let sig = Commitment::new(channel_id.clone(), 801).sign(&auth_key);
+    assert_eq!(client.try_settle(&801, &sig), Err(Ok(Error::InsufficientDeposit.into())));
+}

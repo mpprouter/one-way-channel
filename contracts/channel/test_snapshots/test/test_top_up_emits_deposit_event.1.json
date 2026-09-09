@@ -284,6 +284,18 @@
                       "key": {
                         "vec": [
                           {
+                            "symbol": "DepositedAmount"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "i128": "700"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
                             "symbol": "From"
                           }
                         ]

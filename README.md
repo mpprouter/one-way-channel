@@ -34,8 +34,8 @@ to them.
   expected factory with the expected token, `to`, and `commitment_key`,
   and that no close has started, before accepting any commitment.
 - Verifies the `amount` in each commitment does not exceed the channel's
-  `deposited` total (balance plus already withdrawn). The contract rejects
-  larger commitments, so a commitment beyond `deposited` is worthless.
+  `deposited` total. The contract rejects larger commitments, so a
+  commitment beyond `deposited` is worthless.
 - Keeps the commitment with the highest `amount`. Older commitments stay
   valid signatures but are useless: settlement pays the cumulative
   `amount` minus what was already withdrawn.
@@ -48,16 +48,17 @@ to them.
 ```mermaid
 stateDiagram-v2
     [*] --> Open: __constructor
-    Open --> Closed: close
+    Open --> Refunded: close
     Open --> Closing: close_start
-    Closing --> Closed: close
+    Closing --> Refunded: close
     Closing --> Closed: [after wait]
     Closed --> Refunded: refund
     Refunded --> [*]
 ```
 
-`settle` and `close` can be called in any state before Refunded.
-`top_up` can only be called while Open.
+`settle` can be called in any state before Refunded. `close` can be
+called while Open, Closing, or Closed. `top_up` can only be called while
+Open. `refund` can be called in Closed and Refunded.
 
 ## Functions
 
@@ -105,8 +106,10 @@ address, an ed25519 `commitment_key` (public key), an initial deposit
 amount, and a `refund_waiting_period` (in ledgers).
 
 The funder's tokens are transferred into the channel contract on deployment.
-The funder can also top up the channel later using [`Contract::top_up`], or
-by transferring the token directly to the channel contract address.
+The funder can also top up the channel later using [`Contract::top_up`].
+Only these two paths count towards `deposited`, the ceiling for
+commitments; tokens sent directly to the channel address are not deposits
+and can only be reclaimed by the funder via `refund`.
 
 ### 2. Off-chain payments
 
@@ -152,6 +155,13 @@ A commitment whose amount exceeds the channel's `deposited` total is
 rejected outright. Nothing is transferred and nothing stays claimable:
 the recipient must never accept a commitment beyond `deposited`.
 
+Settlement is all-or-nothing: if the channel's token balance ever drops
+below what a commitment needs (for example through an issuer clawback on
+a token with `AUTH_CLAWBACK_ENABLED`, or a fee-on-transfer token), that
+commitment can no longer be settled. The recipient should therefore only
+accept channels denominated in a token whose issuer it trusts and whose
+transfers move the exact amount.
+
 Settlement is optional. The recipient does not need to settle at all —
 [`Contract::close`] will also settle any unsettled amount. The recipient
 may choose to settle periodically to receive funds without closing the
@@ -169,9 +179,10 @@ uses `try_transfer` and will silently succeed or fail without affecting the
 withdrawal. If the automatic refund fails, the funder can call
 [`Contract::refund`] to reclaim the remaining balance.
 
-Like `settle`, can be called even after the channel is closed, up until
-the funder has been refunded. Once the channel is refunded, whether by
-the automatic refund in `close` or by [`Contract::refund`], it is final.
+Like `settle`, can be called after `close_start`, up until the funder
+has been refunded. `close` itself makes the channel final: a second
+`close` or a later `settle` is rejected. If the automatic refund failed,
+the funder recovers the balance with [`Contract::refund`].
 
 ### 5. Close Start
 
@@ -200,8 +211,9 @@ the recipient and assumed to be of no interest to the recipient.
 Refund makes the channel final. The recipient can no longer settle or
 close, and the funder can no longer top up, so tokens that arrive
 afterwards belong to the funder alone and are reclaimed with a further
-`refund`. A closing or closed channel likewise cannot be topped up, so a
-channel is never reused after a close has started.
+`refund`. A closing channel likewise cannot be topped up, and tokens sent
+directly to the address never raise `deposited`, so a channel is never
+reused after a close has started.
 
 ## Storage lifetime
 
