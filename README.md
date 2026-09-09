@@ -34,8 +34,9 @@ to them.
   expected factory with the expected token, `to`, and `commitment_key`,
   and that no close has started, before accepting any commitment.
 - Verifies the `amount` in each commitment does not exceed the channel's
-  `deposited` total. The contract rejects larger commitments, so a
-  commitment beyond `deposited` is worthless.
+  `deposited` total, and that `balance` still covers `amount - withdrawn`.
+  The contract rejects commitments beyond `deposited`, and a transfer
+  that the balance cannot cover fails, so such a commitment is worthless.
 - Keeps the commitment with the highest `amount`. Older commitments stay
   valid signatures but are useless: settlement pays the cumulative
   `amount` minus what was already withdrawn.
@@ -179,10 +180,10 @@ uses `try_transfer` and will silently succeed or fail without affecting the
 withdrawal. If the automatic refund fails, the funder can call
 [`Contract::refund`] to reclaim the remaining balance.
 
-Like `settle`, can be called after `close_start`, up until the funder
-has been refunded. `close` itself makes the channel final: a second
-`close` or a later `settle` is rejected. If the automatic refund failed,
-the funder recovers the balance with [`Contract::refund`].
+Can be called while the channel is open or closing, but only once:
+`close` makes the channel final, so a second `close` or a later `settle`
+is rejected. If the automatic refund failed, the funder recovers the
+balance with [`Contract::refund`].
 
 ### 5. Close Start
 

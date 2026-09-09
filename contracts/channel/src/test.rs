@@ -2,7 +2,7 @@
 
 use ed25519_dalek::SigningKey;
 use soroban_sdk::{
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Events as _, Ledger},
+    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Events as _, IssuerFlags, Ledger},
     token::{StellarAssetClient, TokenClient},
     xdr, Address, BytesN, Env, IntoVal, Symbol,
 };
@@ -1021,4 +1021,51 @@ fn test_settle_exactly_deposited_after_partial() {
 
     let sig = Commitment::new(channel_id.clone(), 801).sign(&auth_key);
     assert_eq!(client.try_settle(&801, &sig), Err(Ok(Error::InsufficientDeposit.into())));
+}
+
+/// If the automatic refund in `close` fails, the channel is still final for
+/// the recipient, and the funder recovers the balance with `refund` later.
+#[test]
+fn test_close_auto_refund_fails_then_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[33u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+
+    // A token whose issuer can revoke authorization, so a transfer to the
+    // funder can be made to fail.
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    sac.issuer().set_flag(IssuerFlags::RevocableFlag);
+    let token_addr = sac.address();
+    let token = TokenClient::new(&env, &token_addr);
+    let asset_admin = StellarAssetClient::new(&env, &token_addr);
+    asset_admin.mint(&funder, &1000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, 100u32));
+    let client = ContractClient::new(&env, &channel_id);
+
+    // The funder can no longer receive the token, so the auto refund fails.
+    asset_admin.set_authorized(&funder, &false);
+
+    let sig = Commitment::new(channel_id.clone(), 300).sign(&auth_key);
+    client.close(&300, &sig);
+    assert_eq!(token.balance(&to), 300);
+    assert_eq!(token.balance(&channel_id), 200);
+    assert_eq!(token.balance(&funder), 500);
+    assert!(!has_event_type(&env, &channel_id, "refund"));
+
+    // Final for the recipient regardless.
+    let sig2 = Commitment::new(channel_id.clone(), 400).sign(&auth_key);
+    assert_eq!(client.try_settle(&400, &sig2), Err(Ok(Error::Refunded.into())));
+    assert_eq!(client.try_close(&400, &sig2), Err(Ok(Error::Refunded.into())));
+
+    // Once the funder can receive again, refund recovers the balance.
+    asset_admin.set_authorized(&funder, &true);
+    client.refund();
+    assert_eq!(token.balance(&funder), 700);
+    assert_eq!(token.balance(&channel_id), 0);
 }
