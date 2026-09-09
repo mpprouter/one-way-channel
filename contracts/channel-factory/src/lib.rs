@@ -39,6 +39,7 @@ const TTL_EXTEND_TO: u32 = 60 * LEDGERS_PER_DAY;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WasmSet {
     /// The new channel wasm hash.
+    #[topic]
     pub wasm_hash: BytesN<32>,
 }
 

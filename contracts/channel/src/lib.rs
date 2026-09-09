@@ -353,8 +353,8 @@ impl Contract {
     ///   otherwise the recipient may not accept the channel. However, it
     ///   should not be so large that the funder cannot reclaim funds in a
     ///   timely manner. Zero is accepted but gives the recipient no window
-    ///   at all: `refund` is callable in the ledger right after
-    ///   `close_start`. Values above [`MAX_REFUND_WAITING_PERIOD`] (about
+    ///   at all: `refund` is callable in the same ledger as `close_start`,
+    ///   even in the same transaction. Values above [`MAX_REFUND_WAITING_PERIOD`] (about
     ///   one year at 5-second ledgers) are rejected. The value is a ledger
     ///   count and is immutable; its wall-clock meaning changes if the
     ///   network's ledger cadence changes.

@@ -1150,10 +1150,33 @@ fn test_party_addresses_are_event_topics() {
         })
     };
 
+    // Open is emitted by the constructor; re-run the constructor path on a
+    // second channel so its events are the last invocation.
+    let channel2 = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 100i128, 100u32));
+    let events = env.events().all().filter_by_contract(&channel2);
+    let open_topics = events
+        .events()
+        .iter()
+        .find_map(|e| match &e.body {
+            xdr::ContractEventBody::V0(body) if body.topics.first() == Some(&xdr::ScVal::Symbol(xdr::ScSymbol("open".try_into().unwrap()))) => {
+                Some(body.topics.iter().any(|t| t == &from_val) && body.topics.iter().any(|t| t == &to_val))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(open_topics);
+
     let sig = Commitment::new(channel_id.clone(), 200).sign(&auth_key);
     client.settle(&200, &sig);
     assert!(has_topic("withdraw", &to_val));
 
     client.top_up(&100);
     assert!(has_topic("deposit", &from_val));
+
+    client.close_start();
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 101;
+    });
+    client.refund();
+    assert!(has_topic("refund", &from_val));
 }
