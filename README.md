@@ -118,6 +118,15 @@ funder signs the serialized bytes with the ed25519 key corresponding to the
 `commitment_key`. Use [`Contract::prepare_commitment`] as a convenience to
 generate the bytes to sign.
 
+Signatures are verified on-chain with Soroban's `ed25519_verify`, which is
+**strict**: it rejects small-order (weak) public keys and non-canonical
+signature components. Any off-chain verifier the recipient uses to decide
+whether to provide service must be equally strict (for example
+`verify_strict` in ed25519-dalek, which the bundled `ed25519` tool uses),
+otherwise a funder could hand over commitments that look valid off-chain
+but can never be settled on-chain. As defence in depth the constructor
+refuses a small-order `commitment_key` with [`Error::WeakCommitmentKey`].
+
 The serialized commitment is an XDR `ScVal::Map` with four entries
 (sorted alphabetically by key):
 

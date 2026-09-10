@@ -4,7 +4,8 @@ use ed25519_dalek::SigningKey;
 use soroban_sdk::{
     testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Events as _, Ledger},
     token::{StellarAssetClient, TokenClient},
-    xdr, Address, BytesN, Env, IntoVal, Symbol,
+    xdr::{self, ToXdr},
+    Address, BytesN, Env, IntoVal, Symbol,
 };
 
 use crate::{Commitment, Contract, ContractClient};
@@ -390,6 +391,86 @@ fn test_invalid_signature() {
     let sig = Commitment::new(channel_id.clone(), 200).sign(&wrong_key);
     let result = client.try_close(&200, &sig);
     assert!(result.is_err());
+}
+
+/// A small-order (weak) commitment key is refused at construction, so no
+/// channel can be opened whose commitments could pass a lenient off-chain
+/// verifier yet never verify on-chain.
+fn open_with_commitment_key(key: [u8; 32]) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+    let (token_addr, _token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let key = BytesN::from_array(&env, &key);
+    env.register(Contract, (token_addr, funder, key, to, 500i128, 100u32));
+}
+
+/// Canonical encoding of the identity point.
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_constructor_rejects_small_order_commitment_key() {
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    open_with_commitment_key(identity);
+}
+
+/// Non-canonical encoding (y = p, sign bit set) of a small-order point.
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_constructor_rejects_non_canonical_small_order_commitment_key() {
+    let mut non_canonical = [0xffu8; 32];
+    non_canonical[0] = 0xed;
+    open_with_commitment_key(non_canonical);
+}
+
+/// A real key is still accepted.
+#[test]
+fn test_constructor_accepts_real_commitment_key() {
+    let good = SigningKey::from_bytes(&[11u8; 32]);
+    open_with_commitment_key(good.verifying_key().to_bytes());
+}
+
+/// The signing key used in tests is not small-order, so a signature from a
+/// key that ed25519-dalek's strict verifier rejects is also rejected by the
+/// contract: the two verifiers agree.
+#[test]
+fn test_verify_agrees_with_strict_verifier() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let auth_key = SigningKey::from_bytes(&[11u8; 32]);
+    let auth_pubkey = BytesN::from_array(&env, &auth_key.verifying_key().to_bytes());
+
+    let to = Address::generate(&env);
+    let funder = Address::generate(&env);
+    let (token_addr, _token, asset_admin) = create_token(&env);
+    asset_admin.mint(&funder, &1000);
+
+    let channel_id = env.register(Contract, (token_addr.clone(), funder.clone(), auth_pubkey.clone(), to.clone(), 500i128, 100u32));
+    let client = ContractClient::new(&env, &channel_id);
+
+    // A valid signature with a non-canonical S (S + group order) is a
+    // classic malleability case: strict verifiers reject it.
+    let sig = Commitment::new(channel_id.clone(), 200).sign(&auth_key);
+    let mut malleated = sig.to_array();
+    let l: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    ];
+    let mut carry = 0u16;
+    for i in 0..32 {
+        let v = malleated[32 + i] as u16 + l[i] as u16 + carry;
+        malleated[32 + i] = (v & 0xff) as u8;
+        carry = v >> 8;
+    }
+    let malleated_sig = BytesN::from_array(&env, &malleated);
+    let dalek_sig = ed25519_dalek::Signature::from_bytes(&malleated);
+    let payload = Commitment::new(channel_id.clone(), 200).to_xdr(&env).to_buffer::<256>();
+    assert!(auth_key.verifying_key().verify_strict(payload.as_slice(), &dalek_sig).is_err());
+    assert!(client.try_close(&200, &malleated_sig).is_err());
 }
 
 /// Close works after the close_start effective ledger has been reached,
