@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 
 #[derive(Parser)]
@@ -55,7 +55,11 @@ fn main() {
             let sig = skey.sign(&msg.0);
             println!("{}", hex::encode(sig.to_bytes()));
         }
-        Cmd::Verify { pkey, msg, sig } => match pkey.verify(&msg.0, &sig) {
+        // Strict verification matches Soroban's `ed25519_verify`, which rejects
+        // small-order public keys and non-canonical signature components.
+        // A lenient verifier would say "valid" for signatures the contract
+        // rejects on-chain.
+        Cmd::Verify { pkey, msg, sig } => match pkey.verify_strict(&msg.0, &sig) {
             Ok(()) => println!("valid"),
             Err(_) => {
                 println!("invalid");

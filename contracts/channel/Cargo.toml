@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
+hex-literal = "1"
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
