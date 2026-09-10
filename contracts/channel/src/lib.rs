@@ -285,13 +285,17 @@ impl Commitment {
 /// Every 32-byte encoding that decodes to a small-order (torsion) ed25519
 /// point, including the non-canonical encodings (y >= p, sign bit set).
 /// This is the same list libsodium and ed25519-dalek's `is_weak` reject.
+/// Derived from curve25519-dalek 4 `EIGHT_TORSION` (each point in canonical
+/// and `y + p` encoding, with and without the sign bit), filtered by
+/// ed25519-dalek 2.2 `VerifyingKey::is_weak`; the test
+/// `test_small_order_table_matches_dalek_and_is_rejected` cross-checks it.
 ///
 /// Soroban's `ed25519_verify` is strict: it refuses signatures under a
 /// small-order public key. If such a key were accepted as a `commitment_key`
 /// the funder could produce "signatures" that pass lenient off-chain
 /// verifiers while `settle` and `close` fail on-chain forever, so the
 /// constructor rejects them up front.
-const SMALL_ORDER_KEYS: [[u8; 32]; 14] = [
+pub(crate) const SMALL_ORDER_KEYS: [[u8; 32]; 14] = [
     hex_literal::hex!("0000000000000000000000000000000000000000000000000000000000000000"),
     hex_literal::hex!("0000000000000000000000000000000000000000000000000000000000000080"),
     hex_literal::hex!("0100000000000000000000000000000000000000000000000000000000000000"),

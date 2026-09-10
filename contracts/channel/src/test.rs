@@ -1,4 +1,5 @@
 #![cfg(test)]
+extern crate std;
 
 use ed25519_dalek::SigningKey;
 use soroban_sdk::{
@@ -427,6 +428,22 @@ fn test_constructor_rejects_non_canonical_small_order_commitment_key() {
     open_with_commitment_key(non_canonical);
 }
 
+/// Every entry of the contract's small-order table is rejected at
+/// construction, and every entry that ed25519-dalek can parse is one dalek
+/// itself classifies as weak, so the hand-maintained table cannot drift from
+/// the reference implementation unnoticed.
+#[test]
+fn test_small_order_table_matches_dalek_and_is_rejected() {
+    use ed25519_dalek::VerifyingKey;
+    for key in crate::SMALL_ORDER_KEYS.iter() {
+        if let Ok(vk) = VerifyingKey::from_bytes(key) {
+            assert!(vk.is_weak(), "table entry {:?} is not weak per dalek", key);
+        }
+        let result = std::panic::catch_unwind(|| open_with_commitment_key(*key));
+        assert!(result.is_err(), "table entry {:?} was accepted", key);
+    }
+}
+
 /// A real key is still accepted.
 #[test]
 fn test_constructor_accepts_real_commitment_key() {
@@ -434,11 +451,11 @@ fn test_constructor_accepts_real_commitment_key() {
     open_with_commitment_key(good.verifying_key().to_bytes());
 }
 
-/// The signing key used in tests is not small-order, so a signature from a
-/// key that ed25519-dalek's strict verifier rejects is also rejected by the
-/// contract: the two verifiers agree.
+/// A signature whose S component is bumped by the group order L is a
+/// classic malleability case. The unmodified signature passes both dalek's
+/// strict verifier and the contract; the malleated one is rejected by both.
 #[test]
-fn test_verify_agrees_with_strict_verifier() {
+fn test_rejects_signature_with_s_plus_group_order() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -456,6 +473,10 @@ fn test_verify_agrees_with_strict_verifier() {
     // A valid signature with a non-canonical S (S + group order) is a
     // classic malleability case: strict verifiers reject it.
     let sig = Commitment::new(channel_id.clone(), 200).sign(&auth_key);
+    let payload = Commitment::new(channel_id.clone(), 200).to_xdr(&env).to_buffer::<256>();
+    let original = ed25519_dalek::Signature::from_bytes(&sig.to_array());
+    assert!(auth_key.verifying_key().verify_strict(payload.as_slice(), &original).is_ok());
+    assert!(client.try_settle(&100, &Commitment::new(channel_id.clone(), 100).sign(&auth_key)).is_ok());
     let mut malleated = sig.to_array();
     let l: [u8; 32] = [
         0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
@@ -468,7 +489,6 @@ fn test_verify_agrees_with_strict_verifier() {
     }
     let malleated_sig = BytesN::from_array(&env, &malleated);
     let dalek_sig = ed25519_dalek::Signature::from_bytes(&malleated);
-    let payload = Commitment::new(channel_id.clone(), 200).to_xdr(&env).to_buffer::<256>();
     assert!(auth_key.verifying_key().verify_strict(payload.as_slice(), &dalek_sig).is_err());
     assert!(client.try_close(&200, &malleated_sig).is_err());
 }
