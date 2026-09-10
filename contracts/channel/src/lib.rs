@@ -118,6 +118,15 @@
 //! `commitment_key`. Use [`Contract::prepare_commitment`] as a convenience to
 //! generate the bytes to sign.
 //!
+//! Signatures are verified on-chain with Soroban's `ed25519_verify`, which is
+//! **strict**: it rejects small-order (weak) public keys and non-canonical
+//! signature components. Any off-chain verifier the recipient uses to decide
+//! whether to provide service must be equally strict (for example
+//! `verify_strict` in ed25519-dalek, which the bundled `ed25519` tool uses),
+//! otherwise a funder could hand over commitments that look valid off-chain
+//! but can never be settled on-chain. As defence in depth the constructor
+//! refuses a small-order `commitment_key` with [`Error::WeakCommitmentKey`].
+//!
 //! The serialized commitment is an XDR `ScVal::Map` with four entries
 //! (sorted alphabetically by key):
 //!
@@ -227,6 +236,7 @@ pub enum Error {
     NotClosed = 2,
     RefundWaitingPeriodNotElapsed = 3,
     AlreadyClosed = 4,
+    WeakCommitmentKey = 5,
 }
 
 #[contracttype]
@@ -272,6 +282,41 @@ impl Commitment {
     }
 }
 
+/// Every 32-byte encoding that decodes to a small-order (torsion) ed25519
+/// point, including the non-canonical encodings (y >= p, sign bit set).
+/// This is the same list libsodium and ed25519-dalek's `is_weak` reject.
+/// Derived from curve25519-dalek 4 `EIGHT_TORSION` (each point in canonical
+/// and `y + p` encoding, with and without the sign bit), filtered by
+/// ed25519-dalek 2.2 `VerifyingKey::is_weak`; the test
+/// `test_small_order_table_matches_dalek_and_is_rejected` cross-checks it.
+///
+/// Soroban's `ed25519_verify` is strict: it refuses signatures under a
+/// small-order public key. If such a key were accepted as a `commitment_key`
+/// the funder could produce "signatures" that pass lenient off-chain
+/// verifiers while `settle` and `close` fail on-chain forever, so the
+/// constructor rejects them up front.
+pub(crate) const SMALL_ORDER_KEYS: [[u8; 32]; 14] = [
+    hex_literal::hex!("0000000000000000000000000000000000000000000000000000000000000000"),
+    hex_literal::hex!("0000000000000000000000000000000000000000000000000000000000000080"),
+    hex_literal::hex!("0100000000000000000000000000000000000000000000000000000000000000"),
+    hex_literal::hex!("0100000000000000000000000000000000000000000000000000000000000080"),
+    hex_literal::hex!("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+    hex_literal::hex!("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"),
+    hex_literal::hex!("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+    hex_literal::hex!("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa"),
+    hex_literal::hex!("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex_literal::hex!("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+    hex_literal::hex!("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex_literal::hex!("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+    hex_literal::hex!("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex_literal::hex!("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+];
+
+fn is_small_order_key(key: &BytesN<32>) -> bool {
+    let bytes = key.to_array();
+    SMALL_ORDER_KEYS.iter().any(|k| *k == bytes)
+}
+
 #[contract]
 pub struct Contract;
 
@@ -283,7 +328,8 @@ impl Contract {
     /// - `from`: The funder who deposits tokens into the channel.
     /// - `commitment_key`: The ed25519 public key used to verify commitment
     ///   signatures. See `prepare_commitment` for details on
-    ///   commitments.
+    ///   commitments. Small-order (weak) keys are rejected with
+    ///   `Error::WeakCommitmentKey`.
     /// - `to`: The recipient who can settle or close the channel using
     ///   signed commitments.
     /// - `amount`: The initial deposit amount.
@@ -303,6 +349,7 @@ impl Contract {
     /// - `from`: required.
     pub fn __constructor(env: &Env, token: Address, from: Address, commitment_key: BytesN<32>, to: Address, amount: i128, refund_waiting_period: u32) {
         assert_with_error!(env, amount >= 0, Error::NegativeAmount);
+        assert_with_error!(env, !is_small_order_key(&commitment_key), Error::WeakCommitmentKey);
 
         // Store channel configuration.
         env.storage().instance().set(&DataKey::Token, &token);
