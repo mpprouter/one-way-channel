@@ -6,8 +6,12 @@ A payment channel allows a funder to make many small payments to a recipient
 off-chain, with only two on-chain transactions: opening the channel and
 closing it. This avoids per-payment transaction fees and latency.
 
-> [!WARNING]
-> **The contracts in this repository have not been audited.**
+> [!NOTE]
+> **Audit status.** The audited lineage is branch `v1` at commit `a2eb837`
+> (HackenProof, final report 2026-09-11, 0 critical / 0 high / 1 medium /
+> 3 low / 6 informational, all resolved). This `main` branch is not that
+> lineage and does not carry the ROZOSCA hardening commits; use `v1` for
+> the audited contracts. Report: <https://github.com/mpprouter/rozo-mpprouter/releases/download/v0.2.2/HackenProof.Audit.Report.for.MPP.Router.ROZO.pdf>
 
 ## Participants
 
