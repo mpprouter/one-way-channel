@@ -6,8 +6,14 @@ A payment channel allows a funder to make many small payments to a recipient
 off-chain, with only two on-chain transactions: opening the channel and
 closing it. This avoids per-payment transaction fees and latency.
 
-> [!WARNING]
-> **The contracts in this repository have not been audited.**
+> [!NOTE]
+> **Audited.** The contracts on branch `v1` (channel, channel-factory, account,
+> account-factory) were audited by HackenProof, audit window 2026-09-02 to
+> 2026-09-08, target commit `a2eb837`, final report 2026-09-11: 10 findings
+> (0 critical, 0 high, 1 medium, 3 low, 6 informational), all resolved before
+> the final report. Report: <https://github.com/mpprouter/rozo-mpprouter/releases/download/v0.2.2/HackenProof.Audit.Report.for.MPP.Router.ROZO.pdf>
+> (portfolio entry: <https://hackenproof.com/audit-portfolio?search=rozo>).
+> Commits after `a2eb837` are not covered by that report.
 
 ## Participants
 
@@ -301,8 +307,14 @@ be restored before use. Deployed channels do not depend on the factory.
 A custom account contract for Soroban (Stellar) controlled by an EVM
 (secp256k1) wallet key, such as a MetaMask account on Base or Ethereum.
 
-> [!WARNING]
-> **The contracts in this repository have not been audited.**
+> [!NOTE]
+> **Audited.** The contracts on branch `v1` (channel, channel-factory, account,
+> account-factory) were audited by HackenProof, audit window 2026-09-02 to
+> 2026-09-08, target commit `a2eb837`, final report 2026-09-11: 10 findings
+> (0 critical, 0 high, 1 medium, 3 low, 6 informational), all resolved before
+> the final report. Report: <https://github.com/mpprouter/rozo-mpprouter/releases/download/v0.2.2/HackenProof.Audit.Report.for.MPP.Router.ROZO.pdf>
+> (portfolio entry: <https://hackenproof.com/audit-portfolio?search=rozo>).
+> Commits after `a2eb837` are not covered by that report.
 
 The contract stores a single 20-byte Ethereum address. Any Soroban
 invocation that requires this account's authorization is approved by a
@@ -347,8 +359,14 @@ contract wallets (ERC-1271) cannot be verified.
 
 A factory contract for deploying account contracts on Soroban (Stellar).
 
-> [!WARNING]
-> **The contracts in this repository have not been audited.**
+> [!NOTE]
+> **Audited.** The contracts on branch `v1` (channel, channel-factory, account,
+> account-factory) were audited by HackenProof, audit window 2026-09-02 to
+> 2026-09-08, target commit `a2eb837`, final report 2026-09-11: 10 findings
+> (0 critical, 0 high, 1 medium, 3 low, 6 informational), all resolved before
+> the final report. Report: <https://github.com/mpprouter/rozo-mpprouter/releases/download/v0.2.2/HackenProof.Audit.Report.for.MPP.Router.ROZO.pdf>
+> (portfolio entry: <https://hackenproof.com/audit-portfolio?search=rozo>).
+> Commits after `a2eb837` are not covered by that report.
 
 The factory deploys account contracts at deterministic addresses derived
 from the controlling Ethereum address, so that an account's Soroban
