@@ -224,6 +224,18 @@
                       "key": {
                         "vec": [
                           {
+                            "symbol": "DepositedAmount"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "i128": "500"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
                             "symbol": "From"
                           }
                         ]
@@ -540,6 +552,9 @@
             "topics": [
               {
                 "symbol": "deposit"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               }
             ],
             "data": {
@@ -550,14 +565,6 @@
                   },
                   "val": {
                     "i128": "500"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "from"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                   }
                 }
               ]
@@ -577,6 +584,12 @@
             "topics": [
               {
                 "symbol": "open"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
               }
             ],
             "data": {
@@ -599,26 +612,10 @@
                 },
                 {
                   "key": {
-                    "symbol": "from"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                },
-                {
-                  "key": {
                     "symbol": "refund_waiting_period"
                   },
                   "val": {
                     "u32": 100
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "to"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                   }
                 },
                 {

@@ -5,11 +5,13 @@ use soroban_sdk::{contractevent, Address, BytesN};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Open {
     /// The funder who deposited tokens into the channel.
+    #[topic]
     pub from: Address,
+    /// The recipient who can settle or close the channel using a commitment.
+    #[topic]
+    pub to: Address,
     /// The ed25519 public key used to verify commitment signatures.
     pub commitment_key: BytesN<32>,
-    /// The recipient who can settle or close the channel using a commitment.
-    pub to: Address,
     /// The SEP-41 token used for payments.
     pub token: Address,
     /// The initial deposit amount.
@@ -22,12 +24,13 @@ pub struct Open {
 /// including the initial deposit made by the constructor.
 ///
 /// Tokens transferred directly to the channel contract address outside of
-/// top_up do not emit this event and are only observable via the token
-/// contract's own events.
+/// top_up are not deposits: they do not emit this event, do not raise
+/// `deposited`, and are only observable via the token contract's own events.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Deposit {
     /// The funder who deposited the tokens.
+    #[topic]
     pub from: Address,
     /// The amount deposited.
     pub amount: i128,
@@ -51,6 +54,7 @@ pub struct Close {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Withdraw {
     /// The recipient who received the funds.
+    #[topic]
     pub to: Address,
     /// The amount transferred to the recipient.
     pub amount: i128,
@@ -61,6 +65,7 @@ pub struct Withdraw {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Refund {
     /// The funder who received the refund.
+    #[topic]
     pub from: Address,
     /// The amount transferred to the funder. This is the entire remaining
     /// balance of the channel at the time of the refund.
