@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "account"
+version = "0.0.0"
+dependencies = [
+ "k256",
+ "sha3",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "account-factory"
+version = "0.0.0"
+dependencies = [
+ "k256",
+ "sha3",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -634,6 +652,7 @@ dependencies = [
  "elliptic-curve",
  "rfc6979",
  "signature",
+ "spki",
 ]
 
 [[package]]
@@ -689,6 +708,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "pkcs8",
  "rand_core",
  "sec1",
  "subtle",
@@ -951,7 +971,9 @@ dependencies = [
  "cfg-if",
  "ecdsa",
  "elliptic-curve",
+ "once_cell",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -1254,6 +1276,7 @@ dependencies = [
  "base16ct",
  "der",
  "generic-array",
+ "pkcs8",
  "subtle",
  "zeroize",
 ]
